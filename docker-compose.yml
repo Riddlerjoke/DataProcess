@@ -1,0 +1,91 @@
+version: '3.8'
+
+services:
+  # Postgres database
+  postgres:
+    image: postgres:latest
+    container_name: postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mlflow_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mlflow_password}
+      POSTGRES_DB: ${POSTGRES_DB:-mlflow_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  # MinIO for storing artifacts
+  minio:
+    restart: always
+    image: quay.io/minio/minio
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_ACCESS_KEY}
+      MINIO_STORAGE_USE_HTTPS: "false"
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+
+  # MinIO setup to initialize bucket
+  minio-setup:
+    image: quay.io/minio/mc
+    depends_on:
+      - minio
+    volumes:
+      - ./minio/create-bucket.sh:/create-bucket.sh
+    entrypoint: /bin/sh
+    command: -c "chmod +x /create-bucket.sh && /create-bucket.sh"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_ACCESS_KEY}
+
+  # MLflow server with MinIO and PostgreSQL
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    container_name: mlflow_server
+    restart: always
+    environment:
+      MLFLOW_TRACKING_URI: http://0.0.0.0:5000
+      BACKEND_STORE_URI: postgresql://${POSTGRES_USER:-mlflow_user}:${POSTGRES_PASSWORD:-mlflow_password}@postgres/${POSTGRES_DB:-mlflow_db}
+      ARTIFACT_ROOT: s3://mlflow
+      AWS_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_SECRET_ACCESS_KEY}
+      MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT}
+      MLFLOW_S3_IGNORE_TLS: "true"
+    ports:
+      - "5001:5000"
+    depends_on:
+      - postgres
+      - minio-setup
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --backend-store-uri postgresql://${POSTGRES_USER:-mlflow_user}:${POSTGRES_PASSWORD:-mlflow_password}@postgres/${POSTGRES_DB:-mlflow_db}
+      --serve-artifacts
+      --artifacts-destination s3://mlflow
+
+  # API service using FastAPI
+  api:
+    build:
+      context: ./fastapi
+    container_name: fastapi_app
+    volumes:
+      - ./mlruns:/app/mlruns
+      - ./data:/app/data
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow_server:5000
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mlflow
+    command: ["uvicorn", "fastapi.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+volumes:
+  postgres_data:
+  minio_data:
