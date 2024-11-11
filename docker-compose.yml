@@ -47,33 +47,41 @@ services:
 
   # MLflow server with MinIO and PostgreSQL
   mlflow:
-    image: ghcr.io/mlflow/mlflow:latest
+    build:
+      context: ./mlflow  # Chemin vers le dossier contenant le Dockerfile de mlflow
+      dockerfile: Dockerfile  # Nom du Dockerfile dans ce dossier
     container_name: mlflow_server
     restart: always
     environment:
-      MLFLOW_TRACKING_URI: http://0.0.0.0:5000
-      BACKEND_STORE_URI: postgresql://${POSTGRES_USER:-mlflow_user}:${POSTGRES_PASSWORD:-mlflow_password}@postgres/${POSTGRES_DB:-mlflow_db}
+      POSTGRES_USER: mlflow_user
+      POSTGRES_PASSWORD: mlflow_password
+      POSTGRES_DB: mlflow_db
+      BACKEND_STORE_URI: postgresql://mlflow_user:mlflow_password@postgres/mlflow_db
       ARTIFACT_ROOT: s3://mlflow
       AWS_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY}
       AWS_SECRET_ACCESS_KEY: ${MINIO_SECRET_ACCESS_KEY}
-      MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT}
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
       MLFLOW_S3_IGNORE_TLS: "true"
     ports:
       - "5001:5000"
     depends_on:
       - postgres
-      - minio-setup
+      - minio
     command: >
+      /bin/bash -c "
+      pip install psycopg2-binary &&
       mlflow server
       --host 0.0.0.0
       --backend-store-uri postgresql://${POSTGRES_USER:-mlflow_user}:${POSTGRES_PASSWORD:-mlflow_password}@postgres/${POSTGRES_DB:-mlflow_db}
       --serve-artifacts
       --artifacts-destination s3://mlflow
+      "
 
   # API service using FastAPI
   api:
     build:
-      context: ./fastapi
+      context: .
+      dockerfile: ./fastapi/Dockerfile
     container_name: fastapi_app
     volumes:
       - ./mlruns:/app/mlruns
@@ -84,7 +92,7 @@ services:
       - "8000:8000"
     depends_on:
       - mlflow
-    command: ["uvicorn", "fastapi.main:app", "--host", "0.0.0.0", "--port", "8000"]
+      - postgres
 
 volumes:
   postgres_data:

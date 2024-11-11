@@ -1,24 +1,60 @@
-from fastapi import FastAPI, BackgroundTasks, UploadFile, File, HTTPException
+import logging
+import shutil
 import os
 import time
 import subprocess
-import requests
-import pandas as pd
-import json
 
-from great_expectations.core.batch_spec import RuntimeDataBatchSpec
-from great_expectations.data_context.types.base import DataContextConfig
-from sqlalchemy import create_engine
+import boto3
 import mlflow
+import pandas as pd
+from dotenv import load_dotenv
 from mlflow.exceptions import MlflowException
-import great_expectations as ge
-from great_expectations.data_context.data_context.file_data_context import FileDataContext
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from typing import Dict, Any
+
+from pydantic import BaseModel
+from sqlalchemy import create_engine
+
+from training.train_xgboost_mlflow import train_xgboost_model
+import os
 
 app = FastAPI()
 DATA_DIR = "data/datajson"
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs("data/dataclean", exist_ok=True)
+CLEAN_DIR = "data/dataclean"
+
+UPLOAD_DIRECTORY = "uploaded_files"
+os.makedirs(UPLOAD_DIRECTORY, exist_ok=True)
+
+logging.basicConfig(level=logging.INFO)
+
+load_dotenv()
+                              
+# MinIO Configuration
+s3_client = boto3.client(
+    "s3",
+    endpoint_url="http://minio:9000",
+    aws_access_key_id=os.environ['MINIO_ACCESS_KEY'],
+    aws_secret_access_key=os.environ['MINIO_SECRET_ACCESS_KEY']
+)
+
+# PostgreSQL Configuration
+DB_USER = os.environ['POSTGRES_USER']
+DB_PASSWORD = os.environ['POSTGRES_PASSWORD']
+DB_HOST = "postgres"
+DB_PORT = "5432"
+DB_NAME = os.environ['POSTGRES_DB']
+engine = create_engine(f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
+
+
+class DataSource(BaseModel):
+    source_type: str
+    source_path: str
+
+
+class ModelInput(BaseModel):
+    data_path: str  # Exemple de paramètre d'entrée pour le chemin du fichier
 
 
 def connect_to_mlflow() -> None:
@@ -39,10 +75,37 @@ def connect_to_mlflow() -> None:
 connect_to_mlflow()
 
 
-@app.post("/train")
-async def train_model(background_tasks: BackgroundTasks) -> Dict[str, str]:
-    background_tasks.add_task(run_training)
-    return {"status": "Training started"}
+@app.post("/train_xgboost_model")
+async def train_model(file: UploadFile = File(...)):
+    # Définir un chemin absolu pour le fichier temporaire
+    file_path = os.path.abspath(os.path.join(UPLOAD_DIRECTORY, file.filename))
+
+    try:
+        logging.info("Début du téléversement du fichier...")
+
+        # Sauvegarder le fichier téléversé localement
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        # Vérifier l'existence du fichier après la sauvegarde
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=500, detail="Le fichier n'a pas été correctement sauvegardé.")
+
+        logging.info(f"Fichier sauvegardé localement à {file_path}. Démarrage de l'entraînement du modèle...")
+
+        # Appeler la fonction d’entraînement avec le chemin du fichier sauvegardé
+        train_xgboost_model(file_path)
+
+        logging.info("Entraînement terminé avec succès.")
+
+        return {"status": "success", "message": "Entraînement du modèle XGBoost démarré avec succès."}
+    except Exception as e:
+        logging.error(f"Erreur pendant l'entraînement : {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur pendant l'entraînement du modèle : {e}")
+    finally:
+        # Nettoyage : supprimer le fichier temporaire après l’entraînement
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
 
 def run_training() -> None:
@@ -67,7 +130,104 @@ def get_metrics() -> Dict[str, Any]:
         return {"error": "No runs found"}
 
 
+@app.post("/extract_file_data")
+async def extract_file_data(file: UploadFile = File(...)):
+    file_path = os.path.join(DATA_DIR, file.filename)
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    return {"status": "File uploaded successfully", "file_path": file_path}
 
+
+@app.post("/extract_s3_data")
+async def extract_s3_data(bucket_name: str, file_name: str):
+    obj = s3_client.get_object(Bucket=bucket_name, Key=file_name)
+    df = pd.read_csv(obj['Body'])
+    file_path = os.path.join(DATA_DIR, "s3_data.csv")
+    df.to_csv(file_path, index=False)
+    return {"status": "Data extracted from S3", "file_path": file_path}
+
+
+@app.post("/extract_db_data")
+async def extract_db_data():
+    try:
+        logging.info("Starting database extraction.")
+        query = "SELECT * FROM users"
+        df = pd.read_sql(query, engine)
+        logging.info("Data extracted from the database.")
+
+        file_path = os.path.join(DATA_DIR, "db_data.csv")
+        df.to_csv(file_path, index=False)
+        logging.info(f"Data saved to {file_path}.")
+
+        return {"status": "Data extracted from database", "file_path": file_path}
+    except Exception as e:
+        logging.error(f"Error occurred: {e}")
+        return {"status": "Error", "message": str(e)}
+
+
+@app.post("/process_all")
+async def process_all():
+    try:
+        # Chemins des fichiers sources
+        user_csv_path = os.path.join(DATA_DIR, "db_data.csv")
+        transaction_csv_path = os.path.join(DATA_DIR, "s3_data.csv")
+        product_csv_path = os.path.join(DATA_DIR, "products.csv")
+
+        # Vérifier que tous les fichiers existent
+        if not (os.path.exists(user_csv_path) and os.path.exists(transaction_csv_path) and os.path.exists(
+                product_csv_path)):
+            raise HTTPException(status_code=404, detail="Un ou plusieurs fichiers sources sont manquants.")
+
+        # Étape 1 : Fusion des données
+        user_df = pd.read_csv(user_csv_path)
+        transaction_df = pd.read_csv(transaction_csv_path)
+        product_df = pd.read_csv(product_csv_path)
+
+        # Fusionner les DataFrames (en utilisant 'user_id' comme exemple de clé de fusion)
+        merged_df = user_df.merge(transaction_df, on="user_id", how="left").merge(product_df, on="user_id", how="left")
+
+        # Sauvegarder le fichier fusionné
+        merged_file_path = os.path.join(CLEAN_DIR, "merged_data.csv")
+        merged_df.to_csv(merged_file_path, index=False)
+        logging.info(f"Données fusionnées sauvegardées à {merged_file_path}")
+
+        # Étape 2 : Nettoyage des données
+        # Exemple de nettoyage
+        cleaned_df = merged_df.dropna()  # Supprimer les lignes avec des valeurs manquantes
+        if "date_column" in cleaned_df.columns:
+            cleaned_df["date_column"] = pd.to_datetime(cleaned_df["date_column"], errors="coerce")
+            cleaned_df.dropna(subset=["date_column"], inplace=True)  # Supprimer les dates non valides
+
+        # Sauvegarder le fichier nettoyé
+        cleaned_file_path = os.path.join(CLEAN_DIR, "cleaned_merged_data.csv")
+        cleaned_df.to_csv(cleaned_file_path, index=False)
+        logging.info(f"Données nettoyées sauvegardées à {cleaned_file_path}")
+
+        # Étape 3 : Validation des données
+        # Ici, une validation simple pour s’assurer que certaines colonnes nécessaires existent
+        if "user_id" not in cleaned_df.columns:
+            raise HTTPException(status_code=422, detail="Validation échouée : 'user_id' est manquant.")
+
+        # Étape 4 : Agrégation des données
+        # Par exemple, regroupement par 'user_id' et somme des montants
+        aggregated_df = cleaned_df.groupby("user_id").sum()
+
+        # Sauvegarder le fichier agrégé
+        aggregated_file_path = os.path.join(CLEAN_DIR, "aggregated_data.csv")
+        aggregated_df.to_csv(aggregated_file_path)
+        logging.info(f"Données agrégées sauvegardées à {aggregated_file_path}")
+
+        # Retourner les chemins des fichiers générés
+        return {
+            "status": "Processus complet réussi",
+            "merged_file": merged_file_path,
+            "cleaned_file": cleaned_file_path,
+            "aggregated_file": aggregated_file_path
+        }
+
+    except Exception as e:
+        logging.error(f"Erreur pendant le processus : {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur pendant le processus : {e}")
 
 
 
