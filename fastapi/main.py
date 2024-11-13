@@ -1,576 +1,251 @@
 import logging
-import shutil
 import os
-import time
-import subprocess
+import shutil
+from datetime import datetime
 
-import boto3
 import mlflow
 import pandas as pd
-from dotenv import load_dotenv
-from mlflow.exceptions import MlflowException
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from typing import Dict, Any
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from typing import List, Optional
 
 from pydantic import BaseModel
 from sqlalchemy import create_engine
 
+from dataOperation.data_processing import preprocess_files, aggregate_data, save_data
+from dataOperation.data_extraction import extract_file_data, extract_s3_data, extract_db_data
 from training.train_xgboost_mlflow import train_xgboost_model
-import os
+from postgres.ajoutpostgre import add_to_postgres, clean_table_name
 
 app = FastAPI()
-DATA_DIR = "data/datajson"
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs("data/dataclean", exist_ok=True)
-CLEAN_DIR = "data/dataclean"
 
-UPLOAD_DIRECTORY = "uploaded_files"
-os.makedirs(UPLOAD_DIRECTORY, exist_ok=True)
+# Configuration des répertoires
+DATA_DIR = "data/uploaded_files"
+CLEAN_DIR = "data/cleaned_files"
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(CLEAN_DIR, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO)
 
-load_dotenv()
-                              
-# MinIO Configuration
-s3_client = boto3.client(
-    "s3",
-    endpoint_url="http://minio:9000",
-    aws_access_key_id=os.environ['MINIO_ACCESS_KEY'],
-    aws_secret_access_key=os.environ['MINIO_SECRET_ACCESS_KEY']
-)
-
-# PostgreSQL Configuration
-DB_USER = os.environ['POSTGRES_USER']
-DB_PASSWORD = os.environ['POSTGRES_PASSWORD']
-DB_HOST = "postgres"
-DB_PORT = "5432"
-DB_NAME = os.environ['POSTGRES_DB']
-engine = create_engine(f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
+engine = create_engine(
+    f"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}@postgres:5432/{os.getenv('POSTGRES_DB')}")
 
 
-class DataSource(BaseModel):
-    source_type: str
-    source_path: str
+class DBExtractionRequest(BaseModel):
+    query: str
+    table_name: Optional[str] = "extracted_data"
 
 
-class ModelInput(BaseModel):
-    data_path: str  # Exemple de paramètre d'entrée pour le chemin du fichier
-
-
-def connect_to_mlflow() -> None:
-    mlflow_uri = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
-    for _ in range(5):
-        try:
-            mlflow.set_tracking_uri(mlflow_uri)
-            client = mlflow.tracking.MlflowClient()
-            client.search_experiments()
-            print("Connected to MLflow server.")
-            return
-        except MlflowException as e:
-            print(f"Failed to connect to MLflow: {e}. Retrying in 5 seconds...")
-            time.sleep(5)
-    raise RuntimeError("Could not connect to MLflow after multiple attempts.")
-
-
-connect_to_mlflow()
-
-
+################ l'entraînement XGBoost ################
 @app.post("/train_xgboost_model")
-async def train_model(file: UploadFile = File(...)):
-    # Définir un chemin absolu pour le fichier temporaire
-    file_path = os.path.abspath(os.path.join(UPLOAD_DIRECTORY, file.filename))
-
+async def train_model(file: UploadFile = File(...), target_column: str = Form(...)):
     try:
-        logging.info("Début du téléversement du fichier...")
-
-        # Sauvegarder le fichier téléversé localement
+        # Sauvegarde du fichier temporaire pour l'entraînement
+        file_path = os.path.join(DATA_DIR, file.filename)
         with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+            buffer.write(await file.read())
 
-        # Vérifier l'existence du fichier après la sauvegarde
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=500, detail="Le fichier n'a pas été correctement sauvegardé.")
+        # Appel de la fonction d'entraînement du modèle
+        train_xgboost_model(file_path, target_column)
+        logging.info("Entraînement du modèle terminé avec succès.")
 
-        logging.info(f"Fichier sauvegardé localement à {file_path}. Démarrage de l'entraînement du modèle...")
-
-        # Appeler la fonction d’entraînement avec le chemin du fichier sauvegardé
-        train_xgboost_model(file_path)
-
-        logging.info("Entraînement terminé avec succès.")
-
-        return {"status": "success", "message": "Entraînement du modèle XGBoost démarré avec succès."}
+        return {"status": "success", "message": "Entraînement du modèle XGBoost terminé avec succès."}
     except Exception as e:
         logging.error(f"Erreur pendant l'entraînement : {e}")
         raise HTTPException(status_code=500, detail=f"Erreur pendant l'entraînement du modèle : {e}")
     finally:
-        # Nettoyage : supprimer le fichier temporaire après l’entraînement
+        # Suppression du fichier temporaire après l'entraînement
         if os.path.exists(file_path):
             os.remove(file_path)
+            logging.info(f"Fichier supprimé : {file_path}")
 
 
-def run_training() -> None:
-    subprocess.run(["python", "/app/fastapi/train_xgboost_mlflow.py"])
+############# métriques de l'entraînement #############
 
 
 @app.get("/metrics")
-def get_metrics() -> Dict[str, Any]:
-    client = mlflow.tracking.MlflowClient()
-    experiment = client.get_experiment_by_name("Sleep Health XGBoost Experiment")
-    if experiment is None:
-        return {"error": "Experiment not found"}
+def get_metrics():
+    try:
+        client = mlflow.tracking.MlflowClient()
+        experiment = client.get_experiment_by_name("Your Experiment Name Here")
+        if experiment is None:
+            return {"error": "Experiment not found"}
 
-    latest_run = client.search_runs(
-        experiment_ids=[experiment.experiment_id], order_by=["start_time DESC"], max_results=1
-    )
-    if latest_run:
-        run = latest_run[0]
-        metrics = run.data.metrics
-        return {"metrics": metrics}
-    else:
-        return {"error": "No runs found"}
+        latest_run = client.search_runs(
+            experiment_ids=[experiment.experiment_id], order_by=["start_time DESC"], max_results=1
+        )
+        if latest_run:
+            run = latest_run[0]
+            metrics = run.data.metrics
+            return {"metrics": metrics}
+        else:
+            return {"error": "No runs found"}
+    except Exception as e:
+        logging.error(f"Erreur pendant la récupération des métriques : {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur pendant la récupération des métriques : {e}")
 
 
+############# lien de la dernière exécution MLflow #############
+
+
+@app.get("/last_mlflow_run_link")
+def get_last_mlflow_run_link():
+    try:
+        client = mlflow.tracking.MlflowClient()
+        experiment = client.get_experiment_by_name("Your Experiment Name Here")
+        if experiment is None:
+            return {"error": "Experiment not found"}
+
+        latest_run = client.search_runs(
+            experiment_ids=[experiment.experiment_id], order_by=["start_time DESC"], max_results=1
+        )
+        if latest_run:
+            run_id = latest_run[0].info.run_id
+            experiment_id = experiment.experiment_id
+            # Générer le lien avec le bon port
+            mlflow_run_link = f"http://localhost:5001/#/experiments/{experiment_id}/runs/{run_id}"
+            return {"mlflow_run_link": mlflow_run_link}
+        else:
+            return {"error": "No runs found"}
+    except Exception as e:
+        logging.error(f"Erreur lors de la récupération du lien MLflow : {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération du lien MLflow : {e}")
+
+
+
+################################################################################################################
+
+################# Extraction de données #################
+
+# Endpoint pour extraire des données d'un fichier téléchargé
 @app.post("/extract_file_data")
-async def extract_file_data(file: UploadFile = File(...)):
-    file_path = os.path.join(DATA_DIR, file.filename)
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    return {"status": "File uploaded successfully", "file_path": file_path}
+async def extract_file_endpoint(file: UploadFile = File(...)):
+    try:
+        file_path = extract_file_data(file, DATA_DIR)
+        logging.info(f"Fichier extrait et sauvegardé à : {file_path}")
+        return {"status": "success", "file_path": file_path}
+    except Exception as e:
+        logging.error(f"Erreur lors de l'extraction du fichier : {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de l'extraction du fichier : {e}")
 
 
+# Endpoint pour extraire des données depuis S3
 @app.post("/extract_s3_data")
-async def extract_s3_data(bucket_name: str, file_name: str):
-    obj = s3_client.get_object(Bucket=bucket_name, Key=file_name)
-    df = pd.read_csv(obj['Body'])
-    file_path = os.path.join(DATA_DIR, "s3_data.csv")
-    df.to_csv(file_path, index=False)
-    return {"status": "Data extracted from S3", "file_path": file_path}
+async def extract_s3_endpoint(bucket_name: str = Form(...), file_name: str = Form(...)):
+    try:
+        file_path = extract_s3_data(bucket_name, file_name)
+        logging.info(f"Fichier S3 extrait et sauvegardé à : {file_path}")
+        return {"status": "success", "file_path": file_path}
+    except Exception as e:
+        logging.error(f"Erreur lors de l'extraction depuis S3 : {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de l'extraction depuis S3 : {e}")
+
+
+# Endpoint pour extraire des données depuis une base de données PostgreSQL
 
 
 @app.post("/extract_db_data")
 async def extract_db_data():
+    query = "SELECT * FROM users"
+    df = pd.read_sql(query, engine)
+    file_path = os.path.join(DATA_DIR, "db_data.csv")
+    df.to_csv(file_path, index=False)
+    return {"status": "Data extracted from database", "file_path": file_path}
+
+
+################################################################################################################
+
+################# Traitement de données #################
+
+# Endpoint pour le traitement de fichiers multiples
+@app.post("/process_multiple_files")
+async def process_multiple_files(files: List[UploadFile] = File(...), merge_key: Optional[str] = None):
+    session_dir = os.path.join(CLEAN_DIR, datetime.now().strftime("%Y%m%d_%H%M%S"))
+    os.makedirs(session_dir, exist_ok=True)
+    file_paths = []
+
+    # Sauvegarde des fichiers téléchargés
+    for file in files:
+        file_path = os.path.join(session_dir, file.filename)
+        with open(file_path, "wb") as buffer:
+            buffer.write(await file.read())
+        file_paths.append(file_path)
+
     try:
-        logging.info("Starting database extraction.")
-        query = "SELECT * FROM users"
-        df = pd.read_sql(query, engine)
-        logging.info("Data extracted from the database.")
+        # Appel au prétraitement et fusion des fichiers
+        merged_df = preprocess_files(file_paths, merge_key)
+        merged_file_path = save_data(merged_df, session_dir, "merged_data.csv")
 
-        file_path = os.path.join(DATA_DIR, "db_data.csv")
-        df.to_csv(file_path, index=False)
-        logging.info(f"Data saved to {file_path}.")
+        # Appel à l'agrégation des données
+        aggregated_df = aggregate_data(merged_df, group_key=merge_key)
+        aggregated_file_path = save_data(aggregated_df, session_dir, "aggregated_data.csv")
 
-        return {"status": "Data extracted from database", "file_path": file_path}
-    except Exception as e:
-        logging.error(f"Error occurred: {e}")
-        return {"status": "Error", "message": str(e)}
-
-
-@app.post("/process_all")
-async def process_all():
-    try:
-        # Chemins des fichiers sources
-        user_csv_path = os.path.join(DATA_DIR, "db_data.csv")
-        transaction_csv_path = os.path.join(DATA_DIR, "s3_data.csv")
-        product_csv_path = os.path.join(DATA_DIR, "products.csv")
-
-        # Vérifier que tous les fichiers existent
-        if not (os.path.exists(user_csv_path) and os.path.exists(transaction_csv_path) and os.path.exists(
-                product_csv_path)):
-            raise HTTPException(status_code=404, detail="Un ou plusieurs fichiers sources sont manquants.")
-
-        # Étape 1 : Fusion des données
-        user_df = pd.read_csv(user_csv_path)
-        transaction_df = pd.read_csv(transaction_csv_path)
-        product_df = pd.read_csv(product_csv_path)
-
-        # Fusionner les DataFrames (en utilisant 'user_id' comme exemple de clé de fusion)
-        merged_df = user_df.merge(transaction_df, on="user_id", how="left").merge(product_df, on="user_id", how="left")
-
-        # Sauvegarder le fichier fusionné
-        merged_file_path = os.path.join(CLEAN_DIR, "merged_data.csv")
-        merged_df.to_csv(merged_file_path, index=False)
-        logging.info(f"Données fusionnées sauvegardées à {merged_file_path}")
-
-        # Étape 2 : Nettoyage des données
-        # Exemple de nettoyage
-        cleaned_df = merged_df.dropna()  # Supprimer les lignes avec des valeurs manquantes
-        if "date_column" in cleaned_df.columns:
-            cleaned_df["date_column"] = pd.to_datetime(cleaned_df["date_column"], errors="coerce")
-            cleaned_df.dropna(subset=["date_column"], inplace=True)  # Supprimer les dates non valides
-
-        # Sauvegarder le fichier nettoyé
-        cleaned_file_path = os.path.join(CLEAN_DIR, "cleaned_merged_data.csv")
-        cleaned_df.to_csv(cleaned_file_path, index=False)
-        logging.info(f"Données nettoyées sauvegardées à {cleaned_file_path}")
-
-        # Étape 3 : Validation des données
-        # Ici, une validation simple pour s’assurer que certaines colonnes nécessaires existent
-        if "user_id" not in cleaned_df.columns:
-            raise HTTPException(status_code=422, detail="Validation échouée : 'user_id' est manquant.")
-
-        # Étape 4 : Agrégation des données
-        # Par exemple, regroupement par 'user_id' et somme des montants
-        aggregated_df = cleaned_df.groupby("user_id").sum()
-
-        # Sauvegarder le fichier agrégé
-        aggregated_file_path = os.path.join(CLEAN_DIR, "aggregated_data.csv")
-        aggregated_df.to_csv(aggregated_file_path)
-        logging.info(f"Données agrégées sauvegardées à {aggregated_file_path}")
-
-        # Retourner les chemins des fichiers générés
         return {
             "status": "Processus complet réussi",
             "merged_file": merged_file_path,
-            "cleaned_file": cleaned_file_path,
             "aggregated_file": aggregated_file_path
         }
-
     except Exception as e:
         logging.error(f"Erreur pendant le processus : {e}")
         raise HTTPException(status_code=500, detail=f"Erreur pendant le processus : {e}")
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# @app.post("/extract_api_data")
-# async def extract_api_data(background_tasks: BackgroundTasks) -> Dict[str, str]:
-#     background_tasks.add_task(fetch_api_data)
-#     return {"status": "API data extraction started"}
-#
-#
-# def fetch_api_data() -> None:
-#     url = "https://api.example.com/data"
-#     headers = {"Authorization": "Bearer YOUR_API_TOKEN"}
-#     params = {"param1": "value1"}
-#
-#     response = requests.get(url, headers=headers, params=params)
-#     if response.status_code == 200:
-#         data = response.json()
-#         with open("data/api_data.json", "w") as f:
-#             json.dump(data, f)
-#     else:
-#         print("Failed to fetch API data:", response.status_code)
-#
-#
-# @app.post("/extract_file_data")
-# async def extract_file_data(background_tasks: BackgroundTasks, file: UploadFile = File(...)) -> Dict[str, str]:
-#     file_location = f"data/{file.filename}"
-#
-#     with open(file_location, "wb") as f:
-#         f.write(await file.read())
-#
-#     background_tasks.add_task(process_file_data, file_location)
-#
-#     return {"status": "File uploaded and processing started"}
-#
-#
-# def process_file_data(file_location: str) -> None:
-#     df = pd.read_csv(file_location)
-#     output_path = f"data/datajson/{os.path.splitext(os.path.basename(file_location))[0]}.json"
-#     df.to_json(output_path, orient="records")
-#     print(f"Data saved to {output_path}")
-#
-#
-# @app.post("/extract_db_data")
-# async def extract_db_data(background_tasks: BackgroundTasks) -> Dict[str, str]:
-#     background_tasks.add_task(fetch_db_data)
-#     return {"status": "Database data extraction started"}
-#
-#
-# def fetch_db_data() -> None:
-#     engine = create_engine("postgresql://user:password@localhost/dbname")
-#     query = "SELECT * FROM your_table"
-#     df = pd.read_sql(query, engine)
-#     df.to_csv("data/db_data.csv", index=False)
-#
-#
-# @app.post("/run_sql_query")
-# async def run_sql_query(background_tasks: BackgroundTasks) -> Dict[str, str]:
-#     background_tasks.add_task(execute_sql_query)
-#     return {"status": "SQL query execution started"}
-#
-#
-# def execute_sql_query() -> None:
-#     engine = create_engine("postgresql://user:password@localhost/dbname")
-#     query = "SELECT user_id, AVG(score) FROM user_scores GROUP BY user_id"
-#     df = pd.read_sql(query, engine)
-#     df.to_csv("data/aggregated_data.csv", index=False)
-#
-
-# @app.post("/clean_data")
-# async def clean_data(background_tasks: BackgroundTasks, file: UploadFile):
-#     input_path = f"{DATA_DIR}/input_data.csv"
-#     cleaned_path = f"{DATA_DIR}/cleaned_data.json"
-#
-#     # Save uploaded file
-#     with open(input_path, "wb") as f:
-#         f.write(file.file.read())
-#
-#     # Load DataFrame
-#     try:
-#         df = pd.read_csv(input_path)
-#     except Exception as e:
-#         raise HTTPException(status_code=400, detail=f"Error reading CSV file: {e}")
-#
-#     # 1. Handling Missing Values with Column Checks
-#     if "numeric_column" in df.columns:
-#         df["numeric_column"].fillna(df["numeric_column"].mean(), inplace=True)
-#     else:
-#         print("Warning: 'numeric_column' not found in the CSV file.")
-#
-#     if "category_column" in df.columns:
-#         df["category_column"].fillna("Unknown", inplace=True)
-#     else:
-#         print("Warning: 'category_column' not found in the CSV file.")
-#
-#     if "date_column" in df.columns:
-#         df["date_column"] = pd.to_datetime(df["date_column"], errors="coerce").fillna(pd.to_datetime("1900-01-01"))
-#     else:
-#         print("Warning: 'date_column' not found in the CSV file.")
-#
-#     # 2. Outlier Detection and Handling
-#     if "numeric_column" in df.columns:
-#         q1 = df["numeric_column"].quantile(0.25)
-#         q3 = df["numeric_column"].quantile(0.75)
-#         iqr = q3 - q1
-#         lower_bound = q1 - 1.5 * iqr
-#         upper_bound = q3 + 1.5 * iqr
-#         df["numeric_column"] = df["numeric_column"].clip(lower_bound, upper_bound)
-#     else:
-#         print("Warning: 'numeric_column' not found in the CSV file, skipping outlier handling.")
-#
-#     # 3. Standardization/Normalization
-#     if "numeric_column" in df.columns:
-#         min_val = df["numeric_column"].min()
-#         max_val = df["numeric_column"].max()
-#         if min_val != max_val:  # Avoid division by zero
-#             df["numeric_column"] = (df["numeric_column"] - min_val) / (max_val - min_val)
-#         else:
-#             df["numeric_column"] = 0.5  # Assign a constant if all values are the same
-#     else:
-#         print("Warning: 'numeric_column' not found in the CSV file, skipping normalization.")
-#
-#     # 4. Data Type Conversion
-#     if "category_column" in df.columns:
-#         df["category_column"] = df["category_column"].astype("category")
-#     else:
-#         print("Warning: 'category_column' not found in the CSV file, skipping type conversion.")
-#
-#     # 5. Text Data Handling
-#     if "text_column" in df.columns:
-#         df["text_column"] = df["text_column"].str.strip().str.lower()
-#     else:
-#         print("Warning: 'text_column' not found in the CSV file, skipping text handling.")
-#
-#     # Save cleaned data
-#     df.to_json(cleaned_path, orient="records")
-#
-#     return {"status": "Data cleaned", "cleaned_data_path": cleaned_path}
-#
-#
-# class BaseDataContext:
-#     pass
-#
-#
-# @app.post("/validate_data")
-# async def validate_data(background_tasks: BackgroundTasks):
-#     # Path to the cleaned data
-#     cleaned_data_path = f"{DATA_DIR}/cleaned_data.json"
-#
-#     # Load the data
-#     try:
-#         df = pd.read_json(cleaned_data_path)
-#     except ValueError as e:
-#         raise HTTPException(status_code=500, detail=f"Could not load cleaned data: {e}")
-#
-#     # Convert the DataFrame to a Great Expectations dataset
-#     ge_df = PandasDataset(df)
-#
-#     # Example Expectations (adapt based on your actual data structure)
-#     # Check for no null values in specific columns
-#     validation_results = {
-#         "no_null_values": ge_df.expect_column_values_to_not_be_null("your_column_name").success if "your_column_name" in ge_df.columns else None,
-#         "unique_values": ge_df.expect_column_values_to_be_unique("your_column_name").success if "your_column_name" in ge_df.columns else None,
-#         "numeric_range": ge_df.expect_column_values_to_be_between("numeric_column", min_value=0, max_value=100).success if "numeric_column" in ge_df.columns else None
-#     }
-#
-#     # Determine if all validations passed
-#     all_checks_passed = all(result for result in validation_results.values() if result is not None)
-#
-#     return {"validation_results": validation_results, "all_checks_passed": all_checks_passed}
-#
-#
-# @app.post("/aggregate_data")
-# async def aggregate_data():
-#     cleaned_path = f"{DATA_DIR}/cleaned_data.json"
-#     aggregated_path = f"{DATA_DIR}/aggregated_data.csv"
-#
-#     if not os.path.exists(cleaned_path):
-#         return {"error": "Cleaned data not found. Please run /clean_data first."}
-#
-#     # Load cleaned data
-#     df = pd.read_json(cleaned_path)
-#
-#     # Identify potential grouping and numeric columns dynamically
-#     group_columns = [col for col in df.columns if df[col].dtype == 'object' or df[col].nunique() < 50]
-#     numeric_columns = [col for col in df.columns if df[col].dtype in ['int64', 'float64']]
-#
-#     # Ensure we have at least one grouping column and one numeric column
-#     if not group_columns or not numeric_columns:
-#         return {"error": "Suitable columns for aggregation not found in data."}
-#
-#     # Select the first detected group column and aggregate numeric columns
-#     group_column = group_columns[0]
-#     aggregation_methods = {num_col: 'sum' if 'count' not in num_col.lower() else 'mean' for num_col in numeric_columns}
-#
-#     # Perform aggregation
-#     aggregated_df = df.groupby(group_column).agg(aggregation_methods)
-#
-#     # Save aggregated data
-#     aggregated_df.to_csv(aggregated_path)
-#
-#     return {"status": "Data aggregated", "aggregated_data_path": aggregated_path}
-
+################################################################################################################
+
+################# Insertion de données #################
+
+# Endpoint pour l'insertion des données dans PostgreSQL
+@app.post("/upload_to_postgres")
+async def upload_to_postgres(file: UploadFile = File(...), table_name: str = Form(None)):
+    global file_path
+    try:
+        # Si table_name n'est pas fourni, utiliser le nom du fichier nettoyé comme nom de table
+        if not table_name:
+            table_name = clean_table_name(file.filename)
+
+        # Sauvegarde du fichier pour traitement
+        file_path = os.path.join(DATA_DIR, file.filename)
+        with open(file_path, "wb") as buffer:
+            buffer.write(await file.read())
+
+        # Appel à la fonction d'insertion dans la base de données
+        add_to_postgres(file_path, table_name)
+        logging.info(f"Les données ont été insérées dans la table '{table_name}' de PostgreSQL.")
+
+        return {"status": "success", "message": f"Données insérées dans la table '{table_name}' avec succès."}
+    except Exception as e:
+        logging.error(f"Erreur pendant l'insertion en base de données : {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur pendant l'insertion en base de données : {e}")
+    finally:
+        # Suppression du fichier temporaire après l'insertion
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            logging.info(f"Fichier supprimé : {file_path}")
+
+
+########### Endpoint pour l'upload d'un fichier dans PostgreSQL############
+@app.post("/upload_to_postgres")
+async def upload_to_postgres(file: UploadFile = File(...), table_name: str = None):
+    # Define the temporary path to save the file
+    upload_directory = "data/uploaded_files"
+    os.makedirs(upload_directory, exist_ok=True)
+
+    # Save the file temporarily
+    file_path = os.path.join(upload_directory, file.filename)
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    # If table_name is not provided, generate it from the file name
+    if table_name is None:
+        table_name = clean_table_name(file.filename)
+
+    try:
+        # Insert data into PostgreSQL
+        add_to_postgres(file_path, table_name)
+
+        # Remove the temporary file after insertion
+        os.remove(file_path)
+
+        return {"status": "success", "message": f"Données insérées dans la table '{table_name}' avec succès."}
+    except Exception as e:
+        logging.error(f"Erreur pendant l'insertion dans PostgreSQL : {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur d'insertion dans PostgreSQL : {e}")

@@ -86,6 +86,7 @@ services:
     volumes:
       - ./mlruns:/app/mlruns
       - ./data:/app/data
+      - ./data/uploaded_files:/data/uploaded_files
     environment:
       MLFLOW_TRACKING_URI: http://mlflow_server:5000
     ports:
