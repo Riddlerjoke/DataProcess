@@ -111,4 +111,5 @@ def train_xgboost_model(data_path: str, target_column: str):
 
         mlflow.xgboost.log_model(xgb_model, "model")
 
+
     logging.info("Entraînement du modèle terminé avec succès.")
