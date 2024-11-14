@@ -1,4 +1,4 @@
-# ![MLTOOLS](./images/mltools.png)
+# ![MLTOOLS](/streamlitapp/image/mltools-high-resolution-logo-transparent.png)
 # Projet de Traitement et Entraînement de Modèle ML avec XGBoost
 
 
