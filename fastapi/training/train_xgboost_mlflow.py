@@ -1,18 +1,18 @@
 import logging
-
+from typing import Optional
+import os
 import xgboost as xgb
 import mlflow
 import mlflow.xgboost
+from joblib import dump
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 import pandas as pd
-import os
-
-separators = r'[;,|]\s*'
 
 
-def train_xgboost_model(data_path: str, target_column: str):
+def train_xgboost_model(data_path: str, target_column: str = 'target', experiment_name: str = 'default_experiment',
+                        save_local_path: Optional[str] = "saved_models/xgb_model.joblib"):
     # Vérifier l'existence du fichier
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"Le fichier {data_path} est introuvable.")
@@ -28,10 +28,9 @@ def train_xgboost_model(data_path: str, target_column: str):
         else:
             raise ValueError("Format de fichier non pris en charge. Veuillez fournir un fichier .csv ou .xlsx.")
 
-        # Supprimer les colonnes avec plus de 20 % de données manquantes
-        threshold = 0.2
-        df = df.loc[:, df.isnull().mean() < threshold]
-        logging.info(f"Colonnes avec plus de 20% de données manquantes supprimées. Colonnes restantes : {df.columns.tolist()}")
+        # Supprimer les colonnes avec plus de 20 % de valeurs manquantes
+        df = df.loc[:, df.isnull().mean() < 0.2]
+        logging.info(f"Colonnes restantes après suppression : {df.columns.tolist()}")
 
         # Convertir toutes les colonnes mixtes en texte
         for col in df.columns:
@@ -40,8 +39,8 @@ def train_xgboost_model(data_path: str, target_column: str):
 
         logging.info(f"Fichier chargé avec succès. Aperçu des données :\n{df.head()}")
     except Exception as e:
-        logging.error(f"Erreur pendant le chargement du fichier dans pandas : {e}")
-        raise ValueError(f"Erreur pendant le chargement du fichier dans pandas : {e}")
+        logging.error(f"Erreur pendant le chargement du fichier : {e}")
+        raise ValueError(f"Erreur pendant le chargement du fichier : {e}")
 
     # Vérifier la présence de la colonne cible
     if target_column not in df.columns:
@@ -70,32 +69,14 @@ def train_xgboost_model(data_path: str, target_column: str):
     X = df.drop(columns=[target_column])
     y = df[target_column]
 
-    # Traitement des valeurs manquantes de X
+    # Remplir les valeurs manquantes
     X.fillna(X.mode().iloc[0], inplace=True)
-
-    # Traitement des valeurs aberrantes de X et y en utilisant la méthode IQR
-    for column in X.select_dtypes(include=['int', 'float']).columns:
-        Q1 = X[column].quantile(0.25)
-        Q3 = X[column].quantile(0.75)
-        IQR = Q3 - Q1
-        lower_bound = Q1 - 1.5 * IQR
-        upper_bound = Q3 + 1.5 * IQR
-        mask = (X[column] >= lower_bound) & (X[column] <= upper_bound)
-        X = X[mask]
-        y = y[mask]
-
-    # Traitement des valeurs manquantes de la cible (y)
-    y.fillna(y.mode()[0], inplace=True)
-
-    # Vérifier que les dimensions de X et y sont cohérentes
-    if X.shape[0] != y.shape[0]:
-        raise ValueError("Incohérence entre le nombre d'échantillons dans X et y après le prétraitement.")
 
     # Diviser les données en ensembles d'entraînement et de test
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     # Configurer MLflow et entraîner le modèle
-    mlflow.set_experiment("Your Experiment Name Here")
+    mlflow.set_experiment(experiment_name)
     with mlflow.start_run():
         xgb_model = xgb.XGBClassifier(max_depth=3, n_estimators=40, use_label_encoder=False, eval_metric='mlogloss')
         xgb_model.fit(X_train, y_train)
@@ -103,13 +84,33 @@ def train_xgboost_model(data_path: str, target_column: str):
         # Faire des prédictions et évaluer
         y_pred = xgb_model.predict(X_test)
         accuracy = accuracy_score(y_test, y_pred)
+        precision = precision_score(y_test, y_pred, average='weighted')
+        recall = recall_score(y_test, y_pred, average='weighted')
+        f1 = f1_score(y_test, y_pred, average='weighted')
+        auc = roc_auc_score(y_test, xgb_model.predict_proba(X_test), multi_class='ovr') if len(set(y_test)) > 2 else None
 
-        # Enregistrer les paramètres et métriques dans MLflow
+        # Enregistrement des métriques dans MLflow
         mlflow.log_param("max_depth", 3)
         mlflow.log_param("n_estimators", 40)
         mlflow.log_metric("accuracy", accuracy)
+        mlflow.log_metric("precision", precision)
+        mlflow.log_metric("recall", recall)
+        mlflow.log_metric("f1_score", f1)
+
+        if auc is not None:
+            mlflow.log_metric("auc", auc)
+
+        # Création du répertoire pour le modèle si nécessaire, puis sauvegarde
+        if save_local_path:
+            directory = os.path.dirname(save_local_path)
+            if not os.path.exists(directory):
+                os.makedirs(directory)
+                logging.info(f"Répertoire créé : {directory}")
+            dump(xgb_model, save_local_path)
+            mlflow.log_artifact(save_local_path, "model")
+            logging.info(f"Modèle sauvegardé localement à : {save_local_path}")
 
         mlflow.xgboost.log_model(xgb_model, "model")
 
-
     logging.info("Entraînement du modèle terminé avec succès.")
+    return xgb_model, label_encoders, target_encoder

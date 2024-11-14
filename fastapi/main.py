@@ -8,8 +8,10 @@ import pandas as pd
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from typing import List, Optional
 
+from joblib import load
 from pydantic import BaseModel
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, desc
+from sqlalchemy.orm import sessionmaker
 
 from dataOperation.data_processing import preprocess_files, aggregate_data, save_data
 from dataOperation.data_extraction import extract_file_data, extract_s3_data, extract_db_data
@@ -21,13 +23,16 @@ app = FastAPI()
 # Configuration des répertoires
 DATA_DIR = "data/uploaded_files"
 CLEAN_DIR = "data/cleaned_files"
+MODEL_DIR = "data/saved_models"
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(CLEAN_DIR, exist_ok=True)
+os.makedirs(MODEL_DIR, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO)
 
 engine = create_engine(
     f"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}@postgres:5432/{os.getenv('POSTGRES_DB')}")
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 class DBExtractionRequest(BaseModel):
@@ -37,16 +42,27 @@ class DBExtractionRequest(BaseModel):
 
 ################ l'entraînement XGBoost ################
 @app.post("/train_xgboost_model")
-async def train_model(file: UploadFile = File(...), target_column: str = Form(...)):
+async def train_model(file: UploadFile = File(...), target_column: str = Form(...),
+                      model_path: Optional[str] = Form(None),
+                      experiment_name: Optional[str] = Form("Default Experiment")):
     try:
         # Sauvegarde du fichier temporaire pour l'entraînement
         file_path = os.path.join(DATA_DIR, file.filename)
         with open(file_path, "wb") as buffer:
             buffer.write(await file.read())
 
-        # Appel de la fonction d'entraînement du modèle
-        train_xgboost_model(file_path, target_column)
-        logging.info("Entraînement du modèle terminé avec succès.")
+        if model_path and os.path.exists(model_path):
+            # Rechargement du modèle existant
+            logging.info(f"Chargement du modèle depuis : {model_path}")
+            xgb_model = load(model_path)
+            logging.info("Modèle rechargé avec succès.")
+            # Utilisez le modèle pour des prédictions ou affinez-le
+        else:
+            # Entraînement d'un nouveau modèle avec un nom d'expérimentation spécifique
+            logging.info("Aucun modèle existant fourni, entraînement d'un nouveau modèle.")
+            train_xgboost_model(file_path, target_column, experiment_name=experiment_name,
+                                save_local_path="saved_models/xgb_model.joblib")
+            logging.info("Entraînement du modèle terminé avec succès.")
 
         return {"status": "success", "message": "Entraînement du modèle XGBoost terminé avec succès."}
     except Exception as e:
@@ -60,7 +76,6 @@ async def train_model(file: UploadFile = File(...), target_column: str = Form(..
 
 
 ############# métriques de l'entraînement #############
-
 
 @app.get("/metrics")
 def get_metrics():
@@ -84,8 +99,54 @@ def get_metrics():
         raise HTTPException(status_code=500, detail=f"Erreur pendant la récupération des métriques : {e}")
 
 
-############# lien de la dernière exécution MLflow #############
+############# Informations sur le dernier modèle entraîné #############
+@app.get("/last_model_info")
+def get_last_model_info():
+    session = SessionLocal()
+    try:
+        # Récupérer le dernier run en se basant sur `start_time`
+        last_run = session.execute(
+            "SELECT * FROM runs ORDER BY start_time DESC LIMIT 1"
+        ).fetchone()
 
+        if not last_run:
+            raise HTTPException(status_code=404, detail="Aucun modèle trouvé dans la base de données.")
+
+        # Extraire les métriques et paramètres associés à ce `run_uuid`
+        run_uuid = last_run['run_uuid']
+        experiment_id = last_run['experiment_id']
+
+        params = session.execute(
+            "SELECT key, value FROM params WHERE run_uuid = :run_uuid", {'run_uuid': run_uuid}
+        ).fetchall()
+
+        metrics = session.execute(
+            "SELECT key, value FROM metrics WHERE run_uuid = :run_uuid", {'run_uuid': run_uuid}
+        ).fetchall()
+
+        # Lien vers l'exécution dans MLflow
+        mlflow_run_link = f"http://localhost:5001/#/experiments/{experiment_id}/runs/{run_uuid}"
+
+        # Préparer les informations sous forme de dictionnaire
+        model_info = {
+            "run_id": run_uuid,
+            "experiment_id": experiment_id,
+            "start_time": last_run['start_time'],
+            "artifact_uri": last_run['artifact_uri'],
+            "metrics": {metric['key']: metric['value'] for metric in metrics},
+            "params": {param['key']: param['value'] for param in params},
+            "mlflow_run_link": mlflow_run_link
+        }
+        return model_info
+
+    except Exception as e:
+        logging.error(f"Erreur pendant la récupération des informations du modèle : {e}")
+        raise HTTPException(status_code=500, detail="Erreur pendant la récupération des informations du modèle.")
+    finally:
+        session.close()
+
+
+############# lien de la dernière exécution MLflow #############
 
 @app.get("/last_mlflow_run_link")
 def get_last_mlflow_run_link():
@@ -109,7 +170,6 @@ def get_last_mlflow_run_link():
     except Exception as e:
         logging.error(f"Erreur lors de la récupération du lien MLflow : {e}")
         raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération du lien MLflow : {e}")
-
 
 
 ################################################################################################################
