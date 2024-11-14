@@ -52,55 +52,67 @@ Avant de démarrer, assurez-vous d'avoir les éléments suivants installés :
    ```bash
    git clone https://github.com/votre-repo/votre-projet.git
    cd votre-projet
-Configurer l'environnement :
+    ```
+## Configurer l'environnement :
 
-Créez un fichier .env à la racine du projet pour y définir les variables d'environnement nécessaires (ex: POSTGRES_USER, POSTGRES_PASSWORD, MINIO_ACCESS_KEY, etc.)
-Installer les dépendances :
+### Créez un fichier .env à la racine du projet pour y définir les variables d'environnement nécessaires 
 
-bash
-Toujours afficher les détails
+`(ex: POSTGRES_USER, POSTGRES_PASSWORD, MINIO_ACCESS_KEY, etc.)`
+
+
+# Installer les dépendances :
+
 
 Copier le code
+```bash
 pip install -r requirements.txt
 Démarrer les services Docker (optionnel) :
-
-bash
-Toujours afficher les détails
-
+```
 Copier le code
+```bash
 docker-compose up -d
-Utilisation
-Exécution du Serveur API
-Lancer l'API FastAPI :
+```
+# Utilisation
+## Exécution du Serveur API
+### Lancer l'API FastAPI :
 
-bash
-Toujours afficher les détails
+
 
 Copier le code
+```bash
 uvicorn main:app --host 0.0.0.0 --port 8000
-Utilisation de l'Interface Streamlit
-Pour lancer l'interface utilisateur Streamlit :
+```
 
-bash
-Toujours afficher les détails
+## Utilisation de l'Interface Streamlit
+### Pour lancer l'interface utilisateur Streamlit :
+    
+
 
 Copier le code
+```bash
 streamlit run streamlit_app.py
-Endpoints Principaux de l'API
-/extract_file_data : Extraire les données d'un fichier téléchargé.
-/extract_s3_data : Extraire les données depuis un stockage S3.
-/extract_db_data : Extraire les données depuis une base de données PostgreSQL.
-/train_xgboost_model : Entraîner un modèle XGBoost avec des paramètres personnalisés.
-/metrics : Récupérer les métriques d'entraînement du dernier modèle.
-/last_mlflow_run_link : Récupérer le lien MLflow vers la dernière exécution du modèle.
-Exemples d'Utilisation
-Exemple d'Entraînement de Modèle
-Pour entraîner un modèle, téléchargez un fichier et spécifiez la colonne cible :
+```
+### Endpoints Principaux de l'API
+`/extract_file_data : Extraire les données d'un fichier téléchargé.`
 
-python
-Toujours afficher les détails
+`/extract_s3_data : Extraire les données depuis un stockage S3.`
+
+`/extract_db_data : Extraire les données depuis une base de données PostgreSQL.`
+
+`/train_xgboost_model : Entraîner un modèle XGBoost avec des paramètres personnalisés.`
+
+`/metrics : Récupérer les métriques d'entraînement du dernier modèle.`
+
+`/last_mlflow_run_link : Récupérer le lien MLflow vers la dernière exécution du modèle.`
+###
+# Exemples d'Utilisation
+## Exemple d'Entraînement de Modèle
+### Pour entraîner un modèle, téléchargez un fichier et spécifiez la colonne cible :
+
+
 
 Copier le code
+```python
 import requests
 
 url = "http://localhost:8000/train_xgboost_model"
@@ -108,14 +120,29 @@ files = {"file": open("data/dataset.csv", "rb")}
 data = {"target_column": "target", "experiment_name": "Experiment_1"}
 response = requests.post(url, files=files, data=data)
 print(response.json())
-Exemple de Visualisation des Métriques sur Streamlit
-Lancez Streamlit, puis accédez aux pages de visualisation pour voir les dernières métriques d'entraînement et le lien vers MLflow pour explorer plus en détail.
+```
+## Exemple de Visualisation des Métriques sur Streamlit
+### Lancez Streamlit, puis accédez aux pages de visualisation pour voir les dernières métriques d'entraînement et le lien vers MLflow pour explorer plus en détail.
 
-Structure des Dossiers
-data/ - Dossier pour stocker les fichiers de données téléchargés.
-saved_models/ - Dossier pour sauvegarder les modèles.
-streamlit_app/ - Code de l'application Streamlit.
-mlflow/ - Fichiers de configuration pour MLflow.
-requirements.txt - Liste des dépendances Python.
-Contributions
-Les contributions sont les bienvenues ! N'hésitez pas à soumettre des issues ou des pull requests pour améliorer le projet.
+# Structure des Dossiers
+`data/ - Dossier pour stocker les fichiers de données téléchargés.`
+
+`notebooks/ - Notebooks Jupyter pour l'exploration des données et l'entraînement de modèles.`
+
+`models/ - Dossier pour sauvegarder les modèles.`
+
+`streamlit_app/ - Code de l'application Streamlit.`
+
+`mlflow/ - Fichiers de configuration pour MLflow.`
+
+`requirements.txt - Liste des dépendances Python.`
+
+`saved_models/ - Dossier pour sauvegarder les modèles.`
+
+`streamlit_app/ - Code de l'application Streamlit.`
+
+`mlflow/ - Fichiers de configuration pour MLflow.`
+
+`requirements.txt - Liste des dépendances Python.`
+# Contributions
+### Les contributions sont les bienvenues ! N'hésitez pas à soumettre des issues ou des pull requests pour améliorer le projet.
