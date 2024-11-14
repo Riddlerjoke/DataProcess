@@ -1,5 +1,6 @@
-"""
+# ![MLTOOLS](./images/mltools.png)
 # Projet de Traitement et Entraînement de Modèle ML avec XGBoost
+
 
 Bienvenue dans ce projet qui propose un système complet pour l'extraction, le prétraitement, l'entraînement et la surveillance de modèles de machine learning, en utilisant principalement **XGBoost** pour la classification, **MLflow** pour le suivi des expérimentations, et **Streamlit** pour une interface utilisateur interactive.
 
