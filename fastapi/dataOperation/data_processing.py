@@ -60,11 +60,16 @@ def load_and_clean_file(file_path: str, clean_columns: bool = True) -> pd.DataFr
                           .str.strip()
                           .str.title()
                           .str.replace(' ', ''))
-        return df
+        # Prétraitement des colonnes catégoriques
+        categorical_columns = df.select_dtypes(include=["object"]).columns
+        for col in categorical_columns:
+            df[col] = df[col].astype("category")
 
+        logging.info("Fichier chargé et nettoyé avec succès.")
+        return df
     except Exception as e:
-        logging.error(f"Erreur lors du chargement du fichier : {e}")
-        raise HTTPException(status_code=500, detail=f"Erreur de chargement du fichier : {e}")
+        logging.error(f"Erreur pendant le chargement et le nettoyage du fichier : {e}")
+        raise ValueError(f"Erreur pendant le chargement et le nettoyage du fichier : {e}")
 
 
 def preprocess_files(file_paths: List[str], merge_key: Optional[str] = None) -> pd.DataFrame:
@@ -106,3 +111,21 @@ def save_data(df: pd.DataFrame, directory: str, filename: str) -> str:
     file_path = os.path.join(directory, filename)
     df.to_csv(file_path, index=False)
     return file_path
+
+def preprocess_for_prediction(file_path: str) -> pd.DataFrame:
+    """
+    Charge et prépare un fichier pour la prédiction.
+    """
+    try:
+        # Charger et nettoyer le fichier
+        df = load_and_clean_file(file_path)
+
+        # Vérifier la validité des colonnes
+        if df.isnull().values.any():
+            raise ValueError("Les données contiennent des valeurs manquantes.")
+
+        logging.info("Prétraitement des données pour la prédiction terminé.")
+        return df
+    except Exception as e:
+        logging.error(f"Erreur pendant le prétraitement pour la prédiction : {e}")
+        raise ValueError(f"Erreur pendant le prétraitement pour la prédiction : {e}")

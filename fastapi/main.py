@@ -2,10 +2,13 @@ import logging
 import os
 import shutil
 from datetime import datetime
+from io import StringIO
 
+import boto3
 import mlflow
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 
 from joblib import load
@@ -13,12 +16,33 @@ from pydantic import BaseModel
 from sqlalchemy import create_engine, desc
 from sqlalchemy.orm import sessionmaker
 
-from dataOperation.data_processing import preprocess_files, aggregate_data, save_data
+from dataOperation.data_processing import preprocess_files, aggregate_data, save_data, preprocess_for_prediction
 from dataOperation.data_extraction import extract_file_data, extract_s3_data, extract_db_data
+from dataOperation.predict import load_model_from_s3, predict
 from training.train_xgboost_mlflow import train_xgboost_model
 from postgres.ajoutpostgre import add_to_postgres, clean_table_name
+from prometheus_fastapi_instrumentator import Instrumentator
 
+s3_client = boto3.client(
+    "s3",
+    endpoint_url="http://minio:9000",
+    aws_access_key_id=os.getenv('MINIO_ACCESS_KEY'),
+    aws_secret_access_key=os.getenv('MINIO_SECRET_ACCESS_KEY')
+)
+# Créez l'application FastAPI
 app = FastAPI()
+
+# Activer l'instrumentation pour Prometheus avant le démarrage
+instrumentator = Instrumentator().instrument(app).expose(app)
+
+# Configuration du middleware CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Configuration des répertoires
 DATA_DIR = "data/uploaded_files"
@@ -38,6 +62,11 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 class DBExtractionRequest(BaseModel):
     query: str
     table_name: Optional[str] = "extracted_data"
+
+
+@app.on_event("startup")
+async def startup_event():
+    logging.info("Application démarrée avec succès.")
 
 
 ################ l'entraînement XGBoost ################
@@ -170,6 +199,43 @@ def get_last_mlflow_run_link():
     except Exception as e:
         logging.error(f"Erreur lors de la récupération du lien MLflow : {e}")
         raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération du lien MLflow : {e}")
+
+
+@app.post("/predict")
+async def predict_endpoint(
+    bucket_name: str = Form(...),
+    model_path: str = Form(...),
+    file: UploadFile = File(...),
+):
+    try:
+        # Sauvegarder le fichier localement
+        file_path = f"temp/{file.filename}"
+        os.makedirs("temp", exist_ok=True)
+        with open(file_path, "wb") as buffer:
+            buffer.write(await file.read())
+        logging.info(f"Fichier sauvegardé temporairement à : {file_path}")
+
+        # Prétraitement des données
+        df = preprocess_for_prediction(file_path)
+        logging.info("Prétraitement des données terminé.")
+
+        # Charger le modèle depuis le bucket S3
+        model = load_model_from_s3(bucket_name, model_path)
+        logging.info(f"Modèle chargé avec succès depuis le chemin : {model_path}.")
+
+        # Faire des prédictions
+        predictions = predict(df, model)
+        logging.info("Prédictions effectuées avec succès.")
+
+        return {"status": "success", "predictions": predictions.tolist()}
+    except Exception as e:
+        logging.error(f"Erreur pendant la prédiction : {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur pendant la prédiction : {e}")
+    finally:
+        # Nettoyage des fichiers temporaires
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            logging.info(f"Fichier temporaire supprimé : {file_path}")
 
 
 ################################################################################################################
