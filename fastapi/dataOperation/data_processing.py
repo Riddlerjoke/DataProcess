@@ -38,38 +38,35 @@ def process_files(files: List[UploadFile], session_dir: str, merge_key: Optional
     return {"merged_file": merged_path}
 
 
-def load_and_clean_file(file_path: str, clean_columns: bool = True) -> pd.DataFrame:
-    """Charge un fichier CSV ou Excel et nettoie les colonnes."""
+def load_and_clean_file(file_path: str, column_mapping: Optional[dict] = None) -> pd.DataFrame:
+    """
+    Charge un fichier CSV ou Excel, nettoie les colonnes et les mappe aux noms attendus.
+    """
     try:
+        # Charger le fichier
         if file_path.endswith('.csv'):
-            # Charge le fichier CSV avec un traitement pour les guillemets doubles
             df = pd.read_csv(file_path, sep=',', quotechar='"', engine='python')
-            # Remplace les guillemets dans les cellules
-            for col in df.select_dtypes(include='object').columns:
-                df[col] = df[col].str.replace('"', '', regex=False)
-
         elif file_path.endswith('.xlsx'):
             df = pd.read_excel(file_path)
         else:
             raise ValueError("Format de fichier non pris en charge.")
 
-        # Nettoyage des noms de colonnes si l'option est activée
-        if clean_columns:
-            df.columns = (df.columns
-                          .str.replace(r'[-_]', ' ', regex=True)
-                          .str.strip()
-                          .str.title()
-                          .str.replace(' ', ''))
-        # Prétraitement des colonnes catégoriques
+        # Nettoyage des noms de colonnes
+        if column_mapping:
+            df.rename(columns=column_mapping, inplace=True)
+
+        # Convertir les colonnes catégoriques
         categorical_columns = df.select_dtypes(include=["object"]).columns
         for col in categorical_columns:
             df[col] = df[col].astype("category")
 
-        logging.info("Fichier chargé et nettoyé avec succès.")
+        logging.info(f"Fichier chargé et nettoyé avec succès. Aperçu des données :\n{df.head()}")
         return df
+
     except Exception as e:
         logging.error(f"Erreur pendant le chargement et le nettoyage du fichier : {e}")
         raise ValueError(f"Erreur pendant le chargement et le nettoyage du fichier : {e}")
+
 
 
 def preprocess_files(file_paths: List[str], merge_key: Optional[str] = None) -> pd.DataFrame:
@@ -112,7 +109,33 @@ def save_data(df: pd.DataFrame, directory: str, filename: str) -> str:
     df.to_csv(file_path, index=False)
     return file_path
 
-def preprocess_for_prediction(file_path: str) -> pd.DataFrame:
+
+def normalize_columns(data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalise les noms des colonnes pour qu'ils correspondent aux colonnes attendues.
+    """
+    column_mapping = {
+        'gender': 'Gender',
+        'age': 'Age',
+        'occupation': 'Occupation',
+        'sleepduration': 'Sleep Duration',
+        'qualityofsleep': 'Quality of Sleep',
+        'physicalactivitylevel': 'Physical Activity Level',
+        'stresslevel': 'Stress Level',
+        'bmicategory': 'BMI Category',
+        'bloodpressure': 'Blood Pressure',
+        'heartrate': 'Heart Rate',
+        'dailysteps': 'Daily Steps',
+        'sleepdisorder': 'Sleep Disorder',
+    }
+
+    # Convertir les colonnes en minuscules et les renommer
+    data.columns = data.columns.str.lower().str.replace(' ', '').str.replace('_', '').str.replace('-', '')
+    data = data.rename(columns=column_mapping)
+
+    return data
+
+def preprocess_for_prediction(file_path: str, required_columns: Optional[list] = None) -> pd.DataFrame:
     """
     Charge et prépare un fichier pour la prédiction.
     """
@@ -120,9 +143,28 @@ def preprocess_for_prediction(file_path: str) -> pd.DataFrame:
         # Charger et nettoyer le fichier
         df = load_and_clean_file(file_path)
 
+        # Normaliser les noms de colonnes
+        df = normalize_columns(df)
+        logging.info(f"Colonnes normalisées : {df.columns.tolist()}")
+
         # Vérifier la validité des colonnes
-        if df.isnull().values.any():
-            raise ValueError("Les données contiennent des valeurs manquantes.")
+        if required_columns:
+            missing_columns = set(required_columns) - set(df.columns)
+            if missing_columns:
+                raise ValueError(f"Colonnes manquantes : {missing_columns}")
+
+            expected_columns = [
+                'Gender', 'Age', 'Occupation', 'Sleep Duration', 'Physical Activity Level',
+                'Stress Level', 'BMI Category', 'Blood Pressure', 'Heart Rate', 'Daily Steps', 'Sleep Disorder'
+            ]
+
+            # Vérifier les colonnes manquantes
+            missing_columns = [col for col in expected_columns if col not in df.columns]
+            if missing_columns:
+                raise ValueError(f"Colonnes manquantes : {missing_columns}")
+
+            # Réordonner les colonnes
+            df = df[expected_columns]
 
         logging.info("Prétraitement des données pour la prédiction terminé.")
         return df

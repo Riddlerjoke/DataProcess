@@ -8,6 +8,7 @@ from joblib import dump
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.preprocessing import label_binarize
 import pandas as pd
 
 
@@ -83,13 +84,29 @@ def train_xgboost_model(data_path: str, target_column: str = 'target', experimen
 
         # Faire des prédictions et évaluer
         y_pred = xgb_model.predict(X_test)
+        y_pred_proba = xgb_model.predict_proba(X_test)  # Probabilités pour ROC AUC
+
+        # Ensure alignment of y_test and predicted probabilities
+        if len(set(y_test)) != y_pred_proba.shape[1]:
+            # Align the number of classes in y_test and y_pred_proba
+
+            y_test_binarized = label_binarize(y_test, classes=range(y_pred_proba.shape[1]))
+        else:
+
+            y_test_binarized = label_binarize(y_test, classes=list(set(y_test)))
+
+        # Calculate metrics
         accuracy = accuracy_score(y_test, y_pred)
         precision = precision_score(y_test, y_pred, average='weighted')
         recall = recall_score(y_test, y_pred, average='weighted')
         f1 = f1_score(y_test, y_pred, average='weighted')
-        auc = roc_auc_score(y_test, xgb_model.predict_proba(X_test), multi_class='ovr') if len(set(y_test)) > 2 else None
+        try:
+            auc = roc_auc_score(y_test_binarized, y_pred_proba, multi_class="ovr")
+        except Exception as e:
+            logging.warning(f"Erreur dans le calcul de l'AUC : {e}")
+            auc = None
 
-        # Enregistrement des métriques dans MLflow
+        # Log metrics in MLflow
         mlflow.log_param("max_depth", 3)
         mlflow.log_param("n_estimators", 40)
         mlflow.log_metric("accuracy", accuracy)
@@ -100,7 +117,7 @@ def train_xgboost_model(data_path: str, target_column: str = 'target', experimen
         if auc is not None:
             mlflow.log_metric("auc", auc)
 
-        # Création du répertoire pour le modèle si nécessaire, puis sauvegarde
+        # Save and log the model
         if save_local_path:
             directory = os.path.dirname(save_local_path)
             if not os.path.exists(directory):
@@ -111,6 +128,3 @@ def train_xgboost_model(data_path: str, target_column: str = 'target', experimen
             logging.info(f"Modèle sauvegardé localement à : {save_local_path}")
 
         mlflow.xgboost.log_model(xgb_model, "model")
-
-    logging.info("Entraînement du modèle terminé avec succès.")
-    return xgb_model, label_encoders, target_encoder

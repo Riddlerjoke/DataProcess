@@ -16,7 +16,8 @@ from pydantic import BaseModel
 from sqlalchemy import create_engine, desc
 from sqlalchemy.orm import sessionmaker
 
-from dataOperation.data_processing import preprocess_files, aggregate_data, save_data, preprocess_for_prediction
+from dataOperation.data_processing import preprocess_files, aggregate_data, save_data, preprocess_for_prediction, \
+    load_and_clean_file
 from dataOperation.data_extraction import extract_file_data, extract_s3_data, extract_db_data
 from dataOperation.predict import load_model_from_s3, predict
 from training.train_xgboost_mlflow import train_xgboost_model
@@ -51,6 +52,7 @@ MODEL_DIR = "data/saved_models"
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(CLEAN_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
+os.makedirs("temp", exist_ok=True)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -203,39 +205,38 @@ def get_last_mlflow_run_link():
 
 @app.post("/predict")
 async def predict_endpoint(
-    bucket_name: str = Form(...),
-    model_path: str = Form(...),
-    file: UploadFile = File(...),
+        bucket_name: str = Form(...),
+        model_path: str = Form(...),
+        file: UploadFile = File(...)
 ):
     try:
         # Sauvegarder le fichier localement
         file_path = f"temp/{file.filename}"
-        os.makedirs("temp", exist_ok=True)
         with open(file_path, "wb") as buffer:
             buffer.write(await file.read())
-        logging.info(f"Fichier sauvegardé temporairement à : {file_path}")
 
-        # Prétraitement des données
+        # Charger et prétraiter les données
         df = preprocess_for_prediction(file_path)
-        logging.info("Prétraitement des données terminé.")
 
-        # Charger le modèle depuis le bucket S3
+        # Définir les colonnes attendues
+        expected_columns = ['Gender', 'Age', 'Occupation', 'Sleep Duration', 'Physical Activity Level',
+                            'Stress Level', 'BMI Category', 'Blood Pressure', 'Heart Rate', 'Daily Steps',
+                            'Sleep Disorder']
+
+        # Charger le modèle depuis S3
         model = load_model_from_s3(bucket_name, model_path)
-        logging.info(f"Modèle chargé avec succès depuis le chemin : {model_path}.")
 
-        # Faire des prédictions
-        predictions = predict(df, model)
-        logging.info("Prédictions effectuées avec succès.")
+        # Effectuer la prédiction
+        predictions = predict(df, model, expected_columns)
 
         return {"status": "success", "predictions": predictions.tolist()}
     except Exception as e:
         logging.error(f"Erreur pendant la prédiction : {e}")
         raise HTTPException(status_code=500, detail=f"Erreur pendant la prédiction : {e}")
     finally:
-        # Nettoyage des fichiers temporaires
+        # Supprimer le fichier temporaire si nécessaire
         if os.path.exists(file_path):
             os.remove(file_path)
-            logging.info(f"Fichier temporaire supprimé : {file_path}")
 
 
 ################################################################################################################
