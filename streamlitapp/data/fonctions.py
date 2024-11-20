@@ -53,7 +53,7 @@ def display_all_eda(df: pd.DataFrame) -> None:
 def send_training_request(uploaded_file, target_column):
     # Vérifier que le fichier a des données
     if uploaded_file.size == 0:
-        st.error("Le fichier téléversé est vide.")
+        st.error("Le fichier téléchargé est vide.")
         return
 
     # Réinitialiser le pointeur au début du fichier
@@ -98,7 +98,7 @@ def display_dtypes_and_na(df: pd.DataFrame) -> None:
 
 def heatmap_missing_values(df: pd.DataFrame) -> None:
     st.subheader("Heatmap of Missing Values by Column")
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(4, 3))
     ax.set_facecolor("#f7e8a1")
     fig.set_facecolor("#eb804c")
     sns.heatmap(df.isnull(), cmap=["#f7e8a1", "#7a88cc"], cbar=False, ax=ax)
@@ -111,7 +111,7 @@ def heatmap_missing_values(df: pd.DataFrame) -> None:
 
 def barplot_missing_values(df: pd.DataFrame) -> None:
     st.subheader("Bar Plot of Missing Values by Column")
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(4, 3))
     ax.set_facecolor("#f7e8a1")
     fig.set_facecolor("#eb804c")
     sns.barplot(x=df.columns, y=df.isnull().sum(), ax=ax)
