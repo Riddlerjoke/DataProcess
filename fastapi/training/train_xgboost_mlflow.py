@@ -89,10 +89,8 @@ def train_xgboost_model(data_path: str, target_column: str = 'target', experimen
         # Ensure alignment of y_test and predicted probabilities
         if len(set(y_test)) != y_pred_proba.shape[1]:
             # Align the number of classes in y_test and y_pred_proba
-
             y_test_binarized = label_binarize(y_test, classes=range(y_pred_proba.shape[1]))
         else:
-
             y_test_binarized = label_binarize(y_test, classes=list(set(y_test)))
 
         # Calculate metrics

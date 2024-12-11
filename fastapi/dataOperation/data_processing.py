@@ -28,10 +28,23 @@ def process_files(files: List[UploadFile], session_dir: str, merge_key: Optional
         df = pd.read_csv(file_path) if file.filename.endswith('.csv') else pd.read_excel(file_path)
         dataframes.append(df)
 
-    merged_df = dataframes[0]
-    for df in dataframes[1:]:
-        merged_df = merged_df.merge(df, on=merge_key, how="outer") if merge_key else merged_df
+    if merge_key:
+        # Vérifier que la clé de fusion existe dans tous les fichiers
+        for i, df in enumerate(dataframes):
+            if merge_key not in df.columns:
+                raise ValueError(f"La clé '{merge_key}' est absente dans le fichier {files[i].filename}.")
 
+        # Fusionner les DataFrames
+        merged_df = dataframes[0]
+        for df in dataframes[1:]:
+            merged_df = merged_df.merge(df, on=merge_key, how="outer")
+
+        # Supprimer les doublons éventuels après fusion
+        merged_df = merged_df.drop_duplicates()
+    else:
+        raise ValueError("Aucune clé de fusion spécifiée. Impossible de fusionner les fichiers.")
+
+    # Sauvegarder le fichier fusionné
     merged_path = os.path.join(session_dir, "merged_data.csv")
     merged_df.to_csv(merged_path, index=False)
     logging.info(f"Données fusionnées sauvegardées à {merged_path}")
@@ -66,7 +79,6 @@ def load_and_clean_file(file_path: str, column_mapping: Optional[dict] = None) -
     except Exception as e:
         logging.error(f"Erreur pendant le chargement et le nettoyage du fichier : {e}")
         raise ValueError(f"Erreur pendant le chargement et le nettoyage du fichier : {e}")
-
 
 
 def preprocess_files(file_paths: List[str], merge_key: Optional[str] = None) -> pd.DataFrame:
@@ -134,6 +146,7 @@ def normalize_columns(data: pd.DataFrame) -> pd.DataFrame:
     data = data.rename(columns=column_mapping)
 
     return data
+
 
 def preprocess_for_prediction(file_path: str, required_columns: Optional[list] = None) -> pd.DataFrame:
     """
