@@ -18,7 +18,7 @@ from sqlalchemy.orm import sessionmaker
 
 from dataOperation.data_processing import preprocess_files, aggregate_data, save_data, preprocess_for_prediction, \
     load_and_clean_file
-from dataOperation.data_extraction import extract_file_data, extract_s3_data, extract_db_data
+from dataOperation.data_extraction import extract_file_data, extract_s3_data, extract_db_data, scrape_web_page
 from dataOperation.predict import load_model_from_s3, predict
 from training.train_xgboost_mlflow import train_xgboost_model
 from postgres.ajoutpostgre import add_to_postgres, clean_table_name
@@ -277,6 +277,28 @@ async def extract_db_data():
     file_path = os.path.join(DATA_DIR, "db_data.csv")
     df.to_csv(file_path, index=False)
     return {"status": "Data extracted from database", "file_path": file_path}
+
+
+# Endpoint pour scraper des données depuis une URL
+@app.post("/scrape_web_data")
+async def scrape_web_data(url: str = Form(...)):
+    """
+    Endpoint pour extraire des données depuis une page web.
+
+    Args:
+        url (str): URL de la page web à scraper.
+
+    Returns:
+        dict: Statut et chemin du fichier contenant les données extraites.
+    """
+    try:
+        file_path = scrape_web_page(url)
+        logging.info(f"Données scrapées et sauvegardées à : {file_path}")
+        return {"status": "success", "file_path": file_path}
+    except Exception as e:
+        logging.error(f"Erreur lors du scraping de l'URL : {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors du scraping : {e}")
+
 
 
 ################################################################################################################

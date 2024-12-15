@@ -4,6 +4,8 @@ import boto3
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from fastapi import HTTPException, UploadFile
+from bs4 import BeautifulSoup
+import requests
 
 load_dotenv()
 
@@ -15,6 +17,9 @@ s3_client = boto3.client(
 )
 engine = create_engine(
     f"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}@postgres:5432/{os.getenv('POSTGRES_DB')}")
+
+SCRAPED_DATA_DIR = "scraped_data"
+os.makedirs(SCRAPED_DATA_DIR, exist_ok=True)
 
 
 def extract_file_data(file: UploadFile, save_dir: str) -> str:
@@ -52,3 +57,30 @@ def extract_db_data(query: str, save_dir: str, table_name: str) -> str:
         return file_path
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur lors de l'extraction depuis la base de données : {e}")
+
+
+def scrape_web_page(url: str) -> str:
+    """
+    Scrape une page web et extrait des données spécifiques.
+
+    Args:
+        url (str): URL de la page web à scraper.
+
+    Returns:
+        str: Chemin du fichier contenant les données extraites.
+    """
+    response = requests.get(url)
+    if response.status_code != 200:
+        raise ValueError(f"Impossible d'accéder à l'URL : {url}")
+
+    soup = BeautifulSoup(response.content, "html.parser")
+
+    # Exemple : Extraction des titres (balises <h1>)
+    titles = [h1.get_text(strip=True) for h1 in soup.find_all("h1")]
+
+    # Sauvegarder les données dans un fichier texte
+    file_path = os.path.join(SCRAPED_DATA_DIR, "scraped_data.txt")
+    with open(file_path, "w", encoding="utf-8") as file:
+        file.write("\n".join(titles))
+
+    return file_path
